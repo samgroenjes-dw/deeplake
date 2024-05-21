@@ -43,6 +43,8 @@ else:
     _NATIVE_INT32 = ">i4"
     _NATIVE_FLOAT32 = ">f4"
 
+HEADER_MAX_BYTES = 132
+
 DIMS_RE = re.compile(rb" ([0-9]+)x([0-9]+)")
 FPS_RE = re.compile(rb" ([0-9]+) fps,")
 DURATION_RE = re.compile(rb"Duration: ([0-9:.]+),")
@@ -489,18 +491,41 @@ def get_compression(header=None, path=None):
             ".nii",
             ".nii.gz",
         ]
-        path = str(path).lower()
+        path = str(path).lower().partition("?")[0].partition("#")[0].partition(";")[0]
         for fmt in file_formats:
             if path.endswith(fmt):
                 return fmt[1:]
     if header:
+        if (
+            header[4:12] == b"\x66\x74\x79\x70\x4D\x53\x4E\x56"
+            or header[4:12] == b"\x66\x74\x79\x70\x69\x73\x6F\x6D"
+        ):
+            return "mp4"
+        if header[0:4] == b"\x1A\x45\xDF\xA3":
+            return "mkv"
+        if (
+            header[0:2] == b"\xff\xfb"
+            or header[0:2] == b"\xff\xf3"
+            or header[0:2] == b"\xff\xf2"
+        ):
+            return "mp3"
+        if header[0:2] == b"\x66\x4c\x61\x43":
+            return "flac"
+        if header[0:4] == b"\x52\x49\x46\x46" and header[8:12] == b"\x57\x41\x56\x45":
+            return "wav"
+        if header[0:4] == b"\x52\x49\x46\x46" and header[8:12] == b"\x41\x56\x49\x20":
+            return "avi"
+        if header[128:132] == b"\x44\x49\x43\x4D":
+            return "dcm"
+        if header[0:4] == b"\x6e\x2b\x31\x00":
+            return "nii"
         if not Image.OPEN:
             Image.init()
         for fmt in Image.OPEN:
             accept = Image.OPEN[fmt][1]
             if accept and accept(header):
                 return fmt.lower()
-        raise SampleDecompressionError()
+        raise SampleDecompressionError(path)
 
 
 def _verify_png(buf):
@@ -651,10 +676,10 @@ def read_meta_from_compressed_file(
     try:
         if compression is None:
             if hasattr(f, "read"):
-                compression = get_compression(f.read(32), path)
+                compression = get_compression(f.read(HEADER_MAX_BYTES), path)
                 f.seek(0)
             else:
-                compression = get_compression(f[:32], path)  # type: ignore
+                compression = get_compression(f[:HEADER_MAX_BYTES], path)  # type: ignore
         if compression == "jpeg":
             try:
                 shape, typestr = _read_jpeg_shape(f), "|u1"
@@ -780,10 +805,15 @@ def _read_dicom_shape_and_dtype(
         f = BytesIO(f)  # type: ignore
     dcm = dcmread(f)
     nchannels = dcm[0x0028, 0x0002].value
-    shape = (dcm.Rows, dcm.Columns, nchannels)
+    numOfFrames = dcm.get("NumberOfFrames", -1)
+
     isfloat = "FloatPixelData" in dcm or "DoubleFloatPixelData" in dcm
     dtype = pixel_dtype(dcm, isfloat).str
-    return shape, dtype
+
+    if numOfFrames != -1:
+        return (int(numOfFrames), dcm.Rows, dcm.Columns, nchannels), dtype
+    else:
+        return (dcm.Rows, dcm.Columns, nchannels), dtype
 
 
 def _decompress_dicom(f: Union[str, bytes, BinaryIO]):
@@ -856,7 +886,7 @@ def _open_video(file: Union[str, bytes, memoryview]):
         )
 
     if isinstance(file, str):
-        container = av.open(
+        container: Union[av.InputContainer, av.OutputContainer] = av.open(
             file, options={"protocol_whitelist": "file,http,https,tcp,tls,subfile"}
         )
     else:
@@ -941,7 +971,7 @@ def _decompress_video(
     seekable = True
     try:
         container.seek(seek_target, stream=vstream)
-    except av.error.PermissionError:
+    except av.error.FFmpegError:
         seekable = False
         container, vstream = _open_video(file)  # try again but this time don't seek
         warning(
@@ -985,7 +1015,7 @@ def _read_timestamps(
 
     stamps = []
     if vstream.duration is None:
-        time_base = 1 / av.time_base
+        time_base = 1 / av.time_base  # type: ignore
     else:
         time_base = vstream.time_base.numerator / vstream.time_base.denominator
 
@@ -1000,7 +1030,7 @@ def _read_timestamps(
     seekable = True
     try:
         container.seek(seek_target, stream=vstream)
-    except av.error.PermissionError:
+    except av.error.FFmpegError:
         seekable = False
         container, vstream = _open_video(file)  # try again but this time don't seek
         warning(
@@ -1040,7 +1070,7 @@ def _open_audio(file: Union[str, bytes, memoryview]):
         )
 
     if isinstance(file, str):
-        container = av.open(
+        container: Union[av.InputContainer, av.OutputContainer] = av.open(
             file, options={"protocol_whitelist": "file,http,https,tcp,tls,subfile"}
         )
     else:
@@ -1097,7 +1127,7 @@ def _read_audio_meta(
         meta["time_base"] = astream.time_base.numerator / astream.time_base.denominator
     else:
         meta["duration"] = container.duration
-        meta["time_base"] = 1 / av.time_base
+        meta["time_base"] = 1 / av.time_base  # type: ignore
     meta["sample_rate"] = astream.sample_rate
     meta["duration"] = astream.duration or container.duration
     meta["frame_size"] = astream.frame_size

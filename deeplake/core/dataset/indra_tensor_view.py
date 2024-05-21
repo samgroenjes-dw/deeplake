@@ -1,6 +1,6 @@
 import deeplake.util.shape_interval as shape_interval
 from deeplake.core import tensor
-from typing import List, Union, Optional
+from typing import Dict, List, Union, Optional
 from deeplake.core.index import Index
 from deeplake.core.tensor import Any
 import numpy as np
@@ -11,38 +11,24 @@ from deeplake.util.pretty_print import summary_tensor
 import json
 
 
-class DeepLakeQueryTensor(tensor.Tensor):
+class IndraTensorView(tensor.Tensor):
     def __init__(
         self,
-        deeplake_tensor,
         indra_tensor,
-        index: Optional[Index] = None,
         is_iteration: bool = False,
     ):
-        self.deeplake_tensor = deeplake_tensor
         self.indra_tensor = indra_tensor
         self.is_iteration = is_iteration
 
-        self.key = (
-            deeplake_tensor.key
-            if hasattr(deeplake_tensor, "key")
-            else indra_tensor.name
-        )
+        self.key = indra_tensor.name
 
         self.first_dim = None
 
-        self._index = index or Index(self.indra_tensor.index)
-
     def __getattr__(self, key):
         try:
-            return getattr(self.deeplake_tensor, key)
+            return getattr(self.indra_tensor, key)
         except AttributeError:
-            try:
-                return getattr(self.indra_tensor, key)
-            except AttributeError:
-                raise AttributeError(
-                    f"'{self.__class__}' object has no attribute '{key}'"
-                )
+            raise AttributeError(f"'{self.__class__}' object has no attribute '{key}'")
 
     def __getitem__(
         self,
@@ -55,12 +41,8 @@ class DeepLakeQueryTensor(tensor.Tensor):
         if isinstance(item, tuple) or item is Ellipsis:
             item = replace_ellipsis_with_slices(item, self.ndim)
 
-        indra_tensor = self.indra_tensor[item]
-
-        return DeepLakeQueryTensor(
-            self.deeplake_tensor,
-            indra_tensor,
-            index=self.index[item],
+        return IndraTensorView(
+            self.indra_tensor[item],
             is_iteration=is_iteration,
         )
 
@@ -72,26 +54,29 @@ class DeepLakeQueryTensor(tensor.Tensor):
             return r
         else:
             try:
+                if self.index.values[0].subscriptable():
+                    r = r[0]
                 return np.array(r)
             except ValueError:
                 raise DynamicTensorNumpyError(self.name, self.index, "shape")
 
     def text(self, fetch_chunks: bool = False):
         """Return text data. Only applicable for tensors with 'text' base htype."""
+        bs = self.indra_tensor.bytes()
         if self.ndim == 1:
-            return self.indra_tensor.bytes().decode()
-        return list(
-            self.indra_tensor[i].bytes().decode() for i in range(len(self.indra_tensor))
-        )
+            return bs.decode()
+        if isinstance(bs, bytes):
+            return [bs.decode()]
+        return list(b.decode() for b in bs)
 
     def dict(self, fetch_chunks: bool = False):
         """Return json data. Only applicable for tensors with 'json' base htype."""
+        bs = self.indra_tensor.bytes()
         if self.ndim == 1:
-            return json.loads(self.indra_tensor.bytes().decode())
-        return list(
-            json.loads(self.indra_tensor[i].bytes().decode())
-            for i in range(len(self.indra_tensor))
-        )
+            return json.loads(bs.decode())
+        if isinstance(bs, bytes):
+            return [json.loads(bs.decode())]
+        return list(json.loads(b.decode()) for b in self.indra_tensor.bytes())
 
     @property
     def dtype(self):
@@ -102,7 +87,7 @@ class DeepLakeQueryTensor(tensor.Tensor):
         htype = self.indra_tensor.htype
         if self.indra_tensor.is_sequence:
             htype = f"sequence[{htype}]"
-        if self.deeplake_tensor.is_link:
+        if self.indra_tensor.is_link:
             htype = f"link[{htype}]"
         return htype
 
@@ -161,9 +146,20 @@ class DeepLakeQueryTensor(tensor.Tensor):
 
     @property
     def index(self):
-        if self._index is not None:
-            return self._index
-        return Index(self.indra_tensor.indexes)
+        try:
+            return Index(self.indra_tensor.indexes)
+        except:
+            return Index(slice(0, len(self)))
+
+    @property
+    def sample_info(self):
+        try:
+            r = self.indra_tensor.sample_info
+            if not self.index.values[0].subscriptable():
+                r = r[0]
+            return r
+        except:
+            return None
 
     @property
     def shape_interval(self):
@@ -185,16 +181,14 @@ class DeepLakeQueryTensor(tensor.Tensor):
     @property
     def meta(self):
         """Metadata of the tensor."""
-        if self.deeplake_tensor is None:
-            return TensorMeta(
-                htype=self.indra_tensor.htype,
-                dtype=self.indra_tensor.dtype,
-                sample_compression=self.indra_tensor.sample_compression,
-                chunk_compression=None,
-                is_sequence=self.indra_tensor.is_sequence,
-                is_link=False,
-            )
-        return self.deeplake_tensor.chunk_engine.tensor_meta
+        return TensorMeta(
+            htype=self.indra_tensor.htype,
+            dtype=self.indra_tensor.dtype,
+            sample_compression=self.indra_tensor.sample_compression,
+            chunk_compression=None,
+            is_sequence=self.indra_tensor.is_sequence,
+            is_link=False,
+        )
 
     @property
     def base_htype(self):

@@ -195,15 +195,15 @@ def test_deepmemory_evaluate(
         "recall@100": 0.9,
     }
 
-    # TODO: add this back when the issue with the backend is resolved
-    # assert recall["with model"] == {
-    #     "recall@1": 0.8,
-    #     "recall@3": 0.8,
-    #     "recall@5": 0.9,
-    #     "recall@10": 0.9,
-    #     "recall@50": 0.9,
-    #     "recall@100": 0.9,
-    # }
+    assert recall["with model"] == {
+        "recall@1": 0.9,
+        "recall@3": 0.9,
+        "recall@5": 0.9,
+        "recall@10": 0.9,
+        "recall@50": 0.9,
+        "recall@100": 0.9,
+    }
+
     sleep(15)
     queries_dataset = VectorStore(
         path=query_path,
@@ -669,6 +669,7 @@ def test_not_supported_training_args(corpus_query_relevances_copy, hub_cloud_dev
         )
 
 
+@pytest.mark.slow
 def test_deepmemory_v2_set_model_should_set_model_for_all_subsequent_loads(
     local_dmv2_dataset,
     hub_cloud_dev_token,

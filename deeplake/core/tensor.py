@@ -326,8 +326,7 @@ class Tensor:
         progressbar: bool = False,
         ignore_errors: bool = False,
     ):
-        """Extends the end of the tensor by appending multiple elements from a sequence. Accepts a sequence, a single batched numpy array,
-        or a sequence of :func:`deeplake.read` outputs, which can be used to load files. See examples down below.
+        """Extends the end of the tensor by appending multiple elements from a sequence. Accepts a sequence (i.e. a list) or a single numpy array (the first axis in the array is treated as the row axis).
 
         Example:
             Numpy input:
@@ -429,8 +428,7 @@ class Tensor:
 
     @invalid_view_op
     def append(self, sample: InputSample):
-        """Appends a single sample to the end of the tensor. Can be an array, scalar value, or the return value from :func:`deeplake.read`,
-        which can be used to load files. See examples down below.
+        """Appends a single sample (row) to the end of the tensor.
 
         Examples:
             Numpy input:
@@ -1670,7 +1668,7 @@ class Tensor:
         except Exception as e:
             raise Exception(f"An error occurred while deleting VDB indexes: {e}")
 
-    def load_vdb_index(self, id: str, path: Optional[str] = None):
+    def load_vdb_index(self, id: str):
         if self.meta.htype != "embedding":
             raise Exception(f"Only supported for embedding tensors.")
         if not self.meta.contains_vdb_index(id):
@@ -1687,26 +1685,10 @@ class Tensor:
         ts = getattr(ds, self.meta.name)
         from indra import api  # type: ignore
 
-        index_meta = next(x for x in self.meta.vdb_indexes if x["id"] == id)
-        commit_id = self.version_state["commit_id"]
-        b = self.chunk_engine.base_storage[
-            get_tensor_vdb_index_key(self.key, commit_id, id)
-        ]
-        if path is None:
-            return api.vdb.load_index(
-                ts,
-                b,
-                index_type=index_meta["type"],
-                distance_type=index_meta["distance"],
-            )
-        else:
-            return api.vdb.load_index(
-                ts,
-                b,
-                index_type=index_meta["type"],
-                distance_type=index_meta["distance"],
-                path=path,
-            )
+        try:
+            return ts.load_vdb_index(id)
+        except Exception as e:
+            raise ValueError(f"An error occurred while loading the VDB index {id}: {e}")
 
     def unload_vdb_index_cache(self):
         if self.meta.htype != "embedding":
