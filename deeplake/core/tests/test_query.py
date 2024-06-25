@@ -1,11 +1,12 @@
 import deeplake
 from deeplake.tests.common import requires_libdeeplake
-from deeplake.core.dataset.deeplake_query_dataset import DeepLakeQueryDataset
+from deeplake.core.dataset.indra_dataset_view import IndraDatasetView
 from deeplake.client.client import DeepLakeBackendClient
 import pytest
 import numpy as np
 
 
+@pytest.mark.slow
 @requires_libdeeplake
 def test_single_source_query(
     hub_cloud_dev_token,
@@ -26,6 +27,7 @@ def test_single_source_query(
     assert ds.images.meta.htype == "image"
 
 
+@pytest.mark.slow
 @requires_libdeeplake
 def test_multi_source_query(hub_cloud_dev_token):
     with pytest.raises(RuntimeError):

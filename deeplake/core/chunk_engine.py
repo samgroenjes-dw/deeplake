@@ -63,7 +63,10 @@ from deeplake.core.index.index import Index, IndexEntry
 from deeplake.core.meta.encode.chunk_id import CHUNK_ID_COLUMN, ChunkIdEncoder
 from deeplake.core.meta.encode.sequence import SequenceEncoder
 from deeplake.core.meta.encode.pad import PadEncoder
-from deeplake.core.meta.tensor_meta import TensorMeta
+from deeplake.core.meta.tensor_meta import (
+    TensorMeta,
+    _validate_required_htype_overwrites,
+)
 from deeplake.core.storage.lru_cache import LRUCache
 from deeplake.util.casting import get_dtype, get_htype
 from deeplake.core.sample import Sample
@@ -600,7 +603,7 @@ class ChunkEngine:
                 chunk = self.copy_chunk_to_new_commit(chunk, chunk_name)
             return chunk
         except Exception as e:
-            raise GetChunkError(chunk_key) from e
+            raise GetChunkError(chunk_key, cause=e) from e
 
     def get_video_chunk(self, chunk_id, copy: bool = False):
         """Returns video chunks. Chunk will contain presigned url to the video instead of data if the chunk is large."""
@@ -703,7 +706,17 @@ class ChunkEngine:
         tensor_meta = self.tensor_meta
         all_empty = all(sample is None for sample in samples)
         if tensor_meta.htype is None and not all_empty:
-            tensor_meta.set_htype(get_htype(samples))
+            htype = get_htype(samples)
+            if tensor_meta.dtype is not None:
+                _validate_required_htype_overwrites(
+                    htype,
+                    {
+                        "sample_compression": tensor_meta.sample_compression,
+                        "chunk_compression": tensor_meta.chunk_compression,
+                        "dtype": tensor_meta.dtype,
+                    },
+                )
+            tensor_meta.set_htype(htype)
         if tensor_meta.dtype is None and not all_empty:
             if tensor_meta.is_link:
                 try:
@@ -2144,7 +2157,7 @@ class ChunkEngine:
             return None, chunk_info
         cache_used_percent = lambda: self.cache.cache_used / self.cache.cache_size
         while cache_used_percent() > 0.9:
-            time.sleep(0.1)
+            self.cache._pop_from_cache()
         base_storage = storages.get(threading.get_ident())
         if base_storage is None:
             if isinstance(self.base_storage, MemoryProvider):
@@ -2285,7 +2298,7 @@ class ChunkEngine:
                 else:
                     sample = self.get_single_sample(idx, index, pad_tensor=pad_tensor)
             except GetChunkError as e:
-                raise GetChunkError(e.chunk_key, idx, self.name) from e
+                raise GetChunkError(e.chunk_key, idx, self.name, e) from e
             except ReadSampleFromChunkError as e:
                 raise ReadSampleFromChunkError(e.chunk_key, idx, self.name) from e
             check_sample_shape(sample.shape, last_shape, self.key, index, aslist)
@@ -2383,7 +2396,7 @@ class ChunkEngine:
                         )
                     except GetChunkError as e:
                         raise GetChunkError(
-                            e.chunk_key, global_sample_index, self.name
+                            e.chunk_key, global_sample_index, self.name, e
                         ) from e
                     except ReadSampleFromChunkError as e:
                         raise ReadSampleFromChunkError(

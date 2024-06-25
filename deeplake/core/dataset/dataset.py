@@ -10,9 +10,12 @@ from functools import partial
 import pathlib
 import numpy as np
 from time import time, sleep
+
+from jwt import DecodeError
 from tqdm import tqdm
 
 import deeplake
+from deeplake.client.config import DEEPLAKE_AUTH_TOKEN
 from deeplake.core import index_maintenance
 from deeplake.core.index.index import IndexEntry
 from deeplake.core.link_creds import LinkCreds
@@ -36,7 +39,6 @@ from deeplake.util.iteration_warning import (
 from deeplake.util.tensor_db import parse_runtime_parameters
 from deeplake.api.info import load_info
 from deeplake.client.log import logger
-from deeplake.client.utils import read_token
 from deeplake.client.client import DeepLakeBackendClient
 from deeplake.constants import (
     FIRST_COMMIT_ID,
@@ -111,6 +113,7 @@ from deeplake.util.exceptions import (
     BadRequestException,
     SampleAppendError,
     SampleExtendError,
+    DatasetHandlerError,
 )
 from deeplake.util.keys import (
     dataset_exists,
@@ -292,6 +295,7 @@ class Dataset:
         self._initial_autoflush: List[bool] = (
             []
         )  # This is a stack to support nested with contexts
+
         self._indexing_history: List[int] = []
 
         if not self.read_only:
@@ -332,6 +336,16 @@ class Dataset:
                 self.storage.flush()
 
     @property
+    def username(self) -> str:
+        if not self.token:
+            return "public"
+
+        try:
+            return jwt.decode(self.token, options={"verify_signature": False})["id"]
+        except DecodeError:
+            return "public"
+
+    @property
     def num_samples(self) -> int:
         """Returns the length of the smallest tensor.
         Ignores any applied indexing and returns the total length.
@@ -358,7 +372,7 @@ class Dataset:
         return self._client
 
     def __len__(self, warn: bool = True):
-        """Returns the length of the smallest tensor."""
+        """Returns the length (number of rows) of the shortest tensor in the dataset."""
         tensor_lengths = [len(tensor) for tensor in self.tensors.values()]
         pad_tensors = self._pad_tensors
         if (
@@ -376,13 +390,21 @@ class Dataset:
 
     @property
     def max_len(self):
-        """Return the maximum length of the tensor."""
-        return max([len(tensor) for tensor in self.tensors.values()])
+        """Returns the length (number of rows) of the longest tensor in the dataset."""
+        return (
+            max([len(tensor) for tensor in self.tensors.values()])
+            if self.tensors
+            else 0
+        )
 
     @property
     def min_len(self):
-        """Return the minimum length of the tensor."""
-        return min([len(tensor) for tensor in self.tensors.values()])
+        """Returns the length (number of rows) of the shortest tensor in the dataset."""
+        return (
+            min([len(tensor) for tensor in self.tensors.values()])
+            if self.tensors
+            else 0
+        )
 
     def __getstate__(self) -> Dict[str, Any]:
         """Returns a dict that can be pickled and used to restore this dataset.
@@ -646,32 +668,34 @@ class Dataset:
         tiling_threshold: Optional[int] = None,
         **kwargs,
     ):
-        """Creates a new tensor in the dataset.
+        """Creates a new tensor in the Deep Lake dataset. Specifying the tensor's htype is highly recommended for complex data such as images, video, dicom, text, json, etc.
+        Specifying htype is not necessary for simple numeric date such as arrays and scalars.
 
         Examples:
-            >>> # create dataset
-            >>> ds = deeplake.dataset("path/to/dataset")
+            >>> # Create dataset
+            >>> ds = deeplake.empty("path/to/dataset")
 
-            >>> # create tensors
-            >>> ds.create_tensor("images", htype="image", sample_compression="jpg")
-            >>> ds.create_tensor("videos", htype="video", sample_compression="mp4")
-            >>> ds.create_tensor("data")
-            >>> ds.create_tensor("point_clouds", htype="point_cloud")
-
-            >>> # append data
-            >>> ds.images.append(np.ones((400, 400, 3), dtype='uint8'))
-            >>> ds.videos.append(deeplake.read("videos/sample_video.mp4"))
-            >>> ds.data.append(np.zeros((100, 100, 2)))
+            >>> # Create tensors
+            >>> with ds:
+            >>>     ds.create_tensor("images", htype="image", sample_compression="jpg")
+            >>>     ds.create_tensor("videos", htype="video", sample_compression="mp4")
+            >>>     ds.create_tensor("data")
+            >>>     ds.create_tensor("point_clouds", htype="point_cloud")
+            >>>
+            >>>     # Append data
+            >>>     ds.images.append(np.ones((400, 400, 3), dtype='uint8'))
+            >>>     ds.videos.append(deeplake.read("videos/sample_video.mp4"))
+            >>>     ds.data.append(np.zeros((100, 100, 2)))
 
         Args:
             name (str): The name of the tensor to be created.
             htype (str):
-                - The class of data for the tensor.
-                - The defaults for other parameters are determined in terms of this value.
+                - The class of data for the tensor. Specifying ``htype`` is highly recommended for complex data such as images, video, dicom, text, json, etc. Specifying htype is not necessary for simple numeric date such as arrays and scalars.
+                - The defaults for other parameters are determined in terms of this value, thus improving error checking and visualization.
                 - For example, ``htype="image"`` would have ``dtype`` default to ``uint8``.
                 - These defaults can be overridden by explicitly passing any of the other parameters to this function.
                 - May also modify the defaults for other parameters.
-            dtype (str): Optionally override this tensor's ``dtype``. All subsequent samples are required to have this ``dtype``.
+            dtype (str): Optionally override this tensor's ``dtype``. All subsequent samples are required to have this ``dtype``. Specifying ``dtype`` is typically not necessary unless you are dealing with mixed numerical data in a single tensor (column).
             sample_compression (str): All samples will be compressed in the provided format. If ``None``, samples are uncompressed. For ``link[]`` tensors, ``sample_compression`` is used only for optimizing dataset views.
             chunk_compression (str): All chunks will be compressed in the provided format. If ``None``, chunks are uncompressed. For ``link[]`` tensors, ``chunk_compression`` is used only for optimizing dataset views.
             hidden (bool): If ``True``, the tensor will be hidden from ds.tensors but can still be accessed via ``ds[tensor_name]``.
@@ -1156,7 +1180,7 @@ class Dataset:
     def create_tensor_like(
         self, name: str, source: "Tensor", unlink: bool = False
     ) -> "Tensor":
-        """Copies the ``source`` tensor's meta information and creates a new tensor with it. No samples are copied, only the meta/info for the tensor is.
+        """Creates a tensor with the same properties as ``source``. No samples or data copied, other than the tensor meta/info.
 
         Examples:
             >>> ds.create_tensor_like("cats", ds["images"])
@@ -2040,6 +2064,16 @@ class Dataset:
     def read_only(self, value: bool):
         self._set_read_only(value, True)
 
+    @property
+    def allow_delete(self) -> bool:
+        """Returns True if dataset can be deleted from storage. Whether it can be deleted or not is stored in the database_meta.json and can be changed with `allow_delete = True|False`"""
+        return self.meta.allow_delete
+
+    @allow_delete.setter
+    def allow_delete(self, value: bool):
+        self.meta.allow_delete = value
+        self.flush()
+
     def pytorch(
         self,
         transform: Optional[Callable] = None,
@@ -2061,13 +2095,16 @@ class Dataset:
         *args,
         **kwargs,
     ):
-        """Converts the dataset into a pytorch Dataloader.
+        """Creates a PyTorch Dataloader from the Deep Lake dataset. During iteration, the data from all tensors will be streamed on-the-fly from the storage location.
+        Understanding the parameters below is critical for achieving fast streaming for your use-case
 
         Args:
             *args: Additional args to be passed to torch_dataset
             **kwargs: Additional kwargs to be passed to torch_dataset
             transform (Callable, Optional): Transformation function to be applied to each sample.
-            tensors (List, Optional): Optionally provide a list of tensor names in the ordering that your training script expects. For example, if you have a dataset that has "image" and "label" tensors, if ``tensors=["image", "label"]``, your training script should expect each batch will be provided as a tuple of (image, label).
+            tensors (List, Optional): List of tensors to load. If ``None``, all tensors are loaded. Defaults to ``None``.
+                For datasets with many tensors, its extremely important to stream only the data that is needed for training the model, in order to avoid bottlenecks associated with streaming unused data.
+                For example, if you have a dataset that has ``image``, ``label``, and ``metadata`` tensors, if ``tensors=["image", "label"]``, the Data Loader will only stream the ``image`` and ``label`` tensors.
             num_workers (int): The number of workers to use for fetching data in parallel.
             batch_size (int): Number of samples per batch to load. Default value is 1.
             drop_last (bool): Set to True to drop the last incomplete batch, if the dataset size is not divisible by the batch size.
@@ -2084,14 +2121,15 @@ class Dataset:
             return_index (bool): If ``True``, the returned dataloader will have a key "index" that contains the index of the sample(s) in the original dataset. Default value is True.
             pad_tensors (bool): If ``True``, shorter tensors will be padded to the length of the longest tensor. Default value is False.
             transform_kwargs (optional, Dict[str, Any]): Additional kwargs to be passed to ``transform``.
-            decode_method (Dict[str, str], Optional): A dictionary of decode methods for each tensor. Defaults to ``None``.
+            decode_method (Dict[str, str], Optional): The method for decoding the Deep Lake tensor data, the result of which is passed to the transform. Decoding occurs outside of the transform so that it can be performed in parallel and as rapidly as possible as per Deep Lake optimizations.
 
                 - Supported decode methods are:
-
-                    :'numpy': Default behaviour. Returns samples as numpy arrays.
-                    :'tobytes': Returns raw bytes of the samples.
+                    :'numpy': Default behaviour. Returns samples as numpy arrays, the same as ds.tensor[i].numpy()
+                    :'tobytes': Returns raw bytes of the samples the same as ds.tensor[i].tobytes()
+                    :'data': Returns a dictionary with keys,values depending on htype, the same as ds.tensor[i].data()
                     :'pil': Returns samples as PIL images. Especially useful when transformation use torchvision transforms, that
                             require PIL images as input. Only supported for tensors with ``sample_compression='jpeg'`` or ``'png'``.
+
             cache_size (int): The size of the cache per tensor in MBs. Defaults to max(maximum chunk size of tensor, 32 MB).
 
         ..
@@ -2158,14 +2196,14 @@ class Dataset:
         return dataloader
 
     def dataloader(self, ignore_errors: bool = False, verbose: bool = False):
-        """Returns a :class:`~deeplake.enterprise.DeepLakeDataLoader` object.
+        """Returns a :class:`~deeplake.enterprise.dataloader.DeepLakeDataLoader` object.
 
         Args:
             ignore_errors (bool): If ``True``, the data loader will ignore errors appeared during data iteration otherwise it will collect the statistics and report appeared errors. Default value is ``False``
             verbose (bool): If ``True``, the data loader will dump verbose logs of it's steps. Default value is ``False``
 
         Returns:
-            ~deeplake.enterprise.DeepLakeDataLoader: A :class:`deeplake.enterprise.DeepLakeDataLoader` object.
+            ~deeplake.enterprise.dataloader.DeepLakeDataLoader: A :class:`deeplake.enterprise.dataloader.DeepLakeDataLoader` object.
         
         Examples:
 
@@ -2219,7 +2257,7 @@ class Dataset:
             ...     pass
 
         """
-        from deeplake.enterprise import dataloader
+        from deeplake.enterprise.dataloader import dataloader
 
         deeplake_reporter.feature_report(feature_name="dataloader", parameters={})
 
@@ -2255,10 +2293,26 @@ class Dataset:
 
 
         Example:
-            Following filters are identical and return dataset view where all the samples have label equals to 2.
+            Return dataset view where all the samples have label equals to 2:
 
             >>> dataset.filter(lambda sample: sample.labels.numpy() == 2)
-            >>> dataset.filter('labels == 2')
+
+
+            Append one dataset onto another (only works if their structure is identical):
+
+            >>> @deeplake.compute
+            >>> def dataset_append(sample_in, sample_out):
+            >>>
+            >>>     sample_out.append(sample_in.tensors)
+            >>>
+            >>>     return sample_out
+            >>>
+            >>>
+            >>> dataset_append().eval(
+            >>>                 ds_in,
+            >>>                 ds_out,
+            >>>                 num_workers = 2
+            >>>            )
         """
         from deeplake.core.query import filter_dataset, query_dataset
 
@@ -2515,10 +2569,10 @@ class Dataset:
 
     @spinner
     def flush(self):
-        """Necessary operation after writes if caches are being used.
-        Writes all the dirty data from the cache layers (if any) to the underlying storage.
-        Here dirty data corresponds to data that has been changed/assigned and but hasn't yet been sent to the
-        underlying storage.
+        """
+        Writes all the data that has been changed/assigned from the cache layers (if any) to the underlying storage.
+
+        NOTE: The high-level APIs flush the cache automatically and users generally do not have explicitly run the ``flush`` command.
         """
         self._flush_vc_info()
         self.storage.flush()
@@ -2533,11 +2587,13 @@ class Dataset:
 
     def clear_cache(self):
         """
-        - Flushes (see :func:`Dataset.flush`) the contents of the cache layers (if any) and then deletes contents of all the layers of it.
-        - This doesn't delete data from the actual storage.
-        - This is useful if you have multiple datasets with memory caches open, taking up too much RAM.
-        - Also useful when local cache is no longer needed for certain datasets and is taking up storage space.
+        Flushes (see :func:`Dataset.flush`) the contents of the cache layers (if any) and then deletes contents of all the layers of it.
+        This doesn't delete data from the actual storage.
+        This is useful if you have multiple datasets with memory caches open, taking up too much RAM, or when local cache is no longer needed for certain datasets and is taking up storage space.
+
+        NOTE: The high-level APIs clear the cache automatically and users generally do not have explicitly run the ``clear_cache`` command.
         """
+
         if hasattr(self.storage, "clear_cache"):
             self.storage.clear_cache()
 
@@ -2579,7 +2635,7 @@ class Dataset:
 
     @invalid_view_op
     def delete(self, large_ok=False):
-        """Deletes the entire dataset from the cache layers (if any) and the underlying storage.
+        """Deletes the entire dataset from the underlying storage and cache layers (if any).
         This is an **IRREVERSIBLE** operation. Data once deleted can not be recovered.
 
         Args:
@@ -2587,11 +2643,17 @@ class Dataset:
 
         Raises:
             DatasetTooLargeToDelete: If the dataset is larger than 1 GB and ``large_ok`` is ``False``.
+            DatasetHandlerError: If the dataset is marked as allow_delete=False.
         """
 
         deeplake_reporter.feature_report(
             feature_name="delete", parameters={"large_ok": large_ok}
         )
+
+        if not self.allow_delete:
+            raise DatasetHandlerError(
+                "The dataset is marked as allow_delete=false. To delete this dataset, you must first run `allow_delete = True` on the dataset."
+            )
 
         if hasattr(self, "_view_entry"):
             self._view_entry.delete()
@@ -2617,10 +2679,10 @@ class Dataset:
         self.storage.clear()
 
     def summary(self, force: bool = False):
-        """Prints a summary of the dataset.
+        """Prints a summary of the dataset, including the tensor names and their lengths, shapes, htypes, dtypes, compressions, and other relevant information.
 
         Args:
-            force (bool): Dataset views with more than 10000 samples might take a long time to summarize. If `force=True`,
+            force (bool): Dataset views with more than 10000 samples might take several seconds of minutes to summarize. If `force=True`,
                 the summary will be printed regardless. An error will be raised otherwise.
 
         Raises:
@@ -2652,6 +2714,9 @@ class Dataset:
         if self.read_only:
             mode_str = f"read_only=True, "
 
+        if not self.allow_delete:
+            mode_str = f"allow_delete=False, "
+
         index_str = f"index={self.index}, "
         if self.index.is_trivial():
             index_str = ""
@@ -2680,7 +2745,7 @@ class Dataset:
     @property
     def token(self):
         """Get attached token of the dataset"""
-        return self._token or read_token(from_env=True)
+        return self._token or os.environ.get(DEEPLAKE_AUTH_TOKEN)
 
     @token.setter
     def token(self, new_token: str):
@@ -2918,7 +2983,8 @@ class Dataset:
         return self[fullname]
 
     def create_group(self, name: str, exist_ok=False) -> "Dataset":
-        """Creates a tensor group. Intermediate groups in the path are also created.
+        """Creates a tensor group, which is a collection of tensors that can be reference together.
+        Groups are recommended for use-cases with many tensors in order to organize and reference data more easily.
 
         Args:
             name: The name of the group to create.
@@ -2934,11 +3000,17 @@ class Dataset:
         Examples:
 
             >>> ds.create_group("images")
-            >>> ds['images'].create_tensor("cats")
+            >>> ds.images.create_tensor("left_camera", htype = "image", "sample_compression" = "jpeg")
+            >>> ds.images.create_tensor("center_camera", htype = "image", "sample_compression" = "jpeg")
+            >>> ds.images.create_tensor("right_camera", htype = "image", "sample_compression" = "jpeg")
 
-            >>> ds.create_groups("images/jpg/cats")
-            >>> ds["images"].create_tensor("png")
-            >>> ds["images/jpg"].create_group("dogs")
+            >>> # Data from a tensors in groups is referenced using:
+            >>> ds.images.right_camera[0].numpy()
+            >>> # OR
+            >>> ds["images/right_camera"].numpy()
+
+            >>> # "/" Notation can also be used to create groups with ``create_tensor``
+            >>> ds.create_tensor("images/right_camera", htype = "image", "sample_compression" = "jpeg")
         """
 
         deeplake_reporter.feature_report(
@@ -3046,15 +3118,6 @@ class Dataset:
             Exception: Error while attempting to rollback appends.
             SampleAppendingError: Error that occurs when someone tries to append a tensor value directly to the dataset without specifying tensor name.
 
-        Examples:
-
-            >>> ds = deeplake.empty("../test/test_ds")
-            >>> ds.create_tensor('data')
-            Tensor(key='data')
-            >>> ds.create_tensor('labels')
-            Tensor(key='labels')
-            >>> ds.append({"data": [1, 2, 3, 4], "labels":[0, 1, 2, 3]})
-
         """
         tensors = self.tensors
         if isinstance(sample, Dataset):
@@ -3147,10 +3210,10 @@ class Dataset:
         ignore_errors: bool = False,
         progressbar: bool = False,
     ):
-        """Appends multiple rows of samples to mutliple tensors at once. This method expects all tensors being updated to be of the same length.
+        """Appends multiple samples (rows) to mutliple tensors at once. This method expects all tensors being updated to be of the same length.
 
         Args:
-            samples (Dict[str, Any]): Dictionary with tensor names as keys and samples as values.
+            samples (Dict[str, Any]): Dictionary with tensor names as keys and data as values. The values can be a sequence (i.e. a list) or a single numpy array (the first axis in the array is treated as the row axis).
             skip_ok (bool): Skip tensors not in ``samples`` if set to True.
             append_empty (bool): Append empty samples to tensors not specified in ``sample`` if set to ``True``. If True, ``skip_ok`` is ignored.
             ignore_errors (bool): Skip samples that cause errors while extending, if set to ``True``.
@@ -3163,6 +3226,18 @@ class Dataset:
             NotImplementedError: If an error occurs while writing tiles.
             SampleExtendError: If the extend failed while appending a sample.
             Exception: Error while attempting to rollback appends.
+
+        Examples:
+
+            >>> ds = deeplake.empty("../test/test_ds")
+
+            >>> with ds:
+            >>>     ds.create_tensor('data')
+            >>>     ds.create_tensor('labels')
+
+            >>>     # This operation will append 4 samples (rows) to the Deep Lake dataset
+            >>>     ds.extend({"data": [1, 2, 3, 4], "labels":["table", "chair", "desk", "table"]})
+
         """
         extend = False
         if isinstance(samples, Dataset):
@@ -3225,7 +3300,7 @@ class Dataset:
         skip_ok: bool = False,
         append_empty: bool = False,
     ):
-        """Append samples to mutliple tensors at once. This method expects all tensors being updated to be of the same length.
+        """Append a single sample (row) to multiple tensors at once.
 
         Args:
             sample (dict): Dictionary with tensor names as keys and samples as values.
@@ -3243,11 +3318,13 @@ class Dataset:
         Examples:
 
             >>> ds = deeplake.empty("../test/test_ds")
-            >>> ds.create_tensor('data')
-            Tensor(key='data')
-            >>> ds.create_tensor('labels')
-            Tensor(key='labels')
-            >>> ds.append({"data": [1, 2, 3, 4], "labels":[0, 1, 2, 3]})
+
+            >>> with ds:
+            >>>     ds.create_tensor('data')
+            >>>     ds.create_tensor('labels')
+
+            >>>     # This operation will append 1 sample (row) to the Deep Lake dataset
+            >>>     ds.append({"data": 1, "labels": "table"})
 
         """
         new_row_ids = [self.__len__(warn=False)]
@@ -3752,7 +3829,7 @@ class Dataset:
                             ) from e
                     else:
                         raise ReadOnlyModeError(
-                            "Cannot save view in read only dataset. Speicify a path to save the view in a different location."
+                            "Cannot save view in read only dataset. Specify a path to save the view in a different location."
                         )
                 else:
                     vds = self._save_view_in_subdir(
@@ -4242,12 +4319,12 @@ class Dataset:
         progressbar=True,
         public: bool = False,
     ):
-        """Copies this dataset or dataset view to ``dest``. Version control history is not included.
+        """Copies this dataset or dataset view to ``dest``. Version control history is not included, and this operation copies data from the latest commit on the main branch.
 
         Args:
             dest (str, pathlib.Path): Destination dataset or path to copy to. If a Dataset instance is provided, it is expected to be empty.
             tensors (List[str], optional): Names of tensors (and groups) to be copied. If not specified all tensors are copied.
-            runtime (dict): Parameters for Activeloop DB Engine. Only applicable for hub:// paths.
+            runtime (dict): Parameters for Activeloop DB Engine. Only applicable for hub://... paths.
             overwrite (bool): If ``True`` and a dataset exists at `destination`, it will be overwritten. Defaults to False.
             creds (dict, Optional): creds required to create / overwrite datasets at `dest`.
             token (str, Optional): token used to for fetching credentials to `dest`.
@@ -4340,21 +4417,25 @@ class Dataset:
         ds_name: Optional[str] = None,
         token: Optional[str] = None,
     ):
-        """Connect a Deep Lake cloud dataset through a deeplake path.
+        """Connect a Deep Lake dataset stored in your cloud to the Deep Lake App.
 
         Examples:
-            >>> # create/load an s3 dataset
-            >>> s3_ds = deeplake.dataset("s3://bucket/dataset")
-            >>> ds = s3_ds.connect(dest_path="hub://my_org/dataset", creds_key="my_managed_credentials_key", token="my_activeloop_token)
-            >>> # or
-            >>> ds = s3_ds.connect(org_id="my_org", creds_key="my_managed_credentials_key", token="my_activeloop_token")
+            >>> # Load an s3 dataset
+            >>> s3_ds = deeplake.load("s3://bucket/dataset")
+            >>>
+            >>> # Specify the org_id and managed creds_key, and the dataset name is inferred from the currently storage location path
+            >>> ds = s3_ds.connect(org_id="my_org_id", creds_key="managed_creds_key")
+            >>>
+            >>> # Or if you want to explicitly specify the full path, which contains the org_id
+            >>> ds = s3_ds.connect(dest_path="hub://my_org/dataset", creds_key="managed_creds_key")
+
 
         Args:
             creds_key (str): The managed credentials to be used for accessing the source path.
-            dest_path (str, optional): The full path to where the connected Deep Lake dataset will reside. Can be:
-                a Deep Lake path like ``hub://organization/dataset``
-            org_id (str, optional): The organization to where the connected Deep Lake dataset will be added.
-            ds_name (str, optional): The name of the connected Deep Lake dataset. Will be infered from ``dest_path`` or ``src_path`` if not provided.
+            dest_path (str, optional): The full path to which the connected Deep Lake dataset will reside. Can be:
+                a Deep Lake path like ``hub://<org_id>/<dataset_name>``
+            org_id (str, optional): The organization to which the connected Deep Lake dataset will be added. The dataset name will be the same as parent folder for the dataset in the cloud storage location.
+            ds_name (str, optional): The name of the connected Deep Lake dataset. Will be infered from ``dest_path`` or storage location path if not provided.
             token (str, optional): Activeloop token used to fetch the managed credentials.
 
         Raises:
@@ -4556,6 +4637,40 @@ class Dataset:
     def __contains__(self, tensor: str):
         return tensor in self.tensors
 
+    def _optimize_and_copy_view(
+        self,
+        info,
+        path: str,
+        tensors: Optional[List[str]] = None,
+        external=False,
+        unlink=True,
+        num_workers=0,
+        scheduler="threaded",
+        progressbar=True,
+    ):
+        tql_query = info.get("tql_query")
+        vds = self._sub_ds(".queries/" + path, verbose=False)
+        view = vds._get_view(not external)
+        new_path = path + "_OPTIMIZED"
+        if tql_query is not None:
+            view = view.query(tql_query)
+            view.indra_ds.materialize(new_path, tensors, True)
+            optimized = self._sub_ds(".queries/" + new_path, empty=False, verbose=False)
+        else:
+            optimized = self._sub_ds(".queries/" + new_path, empty=True, verbose=False)
+            view._copy(
+                optimized,
+                tensors=tensors,
+                overwrite=True,
+                unlink=unlink,
+                create_vds_index_tensor=True,
+                num_workers=num_workers,
+                scheduler=scheduler,
+                progressbar=progressbar,
+            )
+        optimized.info.update(vds.info.__getstate__())
+        return (vds, optimized, new_path)
+
     def _optimize_saved_view(
         self,
         id: str,
@@ -4582,32 +4697,24 @@ class Dataset:
                         # Already optimized
                         return info
                     path = info.get("path", info["id"])
-                    vds = self._sub_ds(".queries/" + path, verbose=False)
-                    view = vds._get_view(not external)
-                    new_path = path + "_OPTIMIZED"
-                    optimized = self._sub_ds(
-                        ".queries/" + new_path, empty=True, verbose=False
-                    )
-                    view._copy(
-                        optimized,
+                    old, new, new_path = self._optimize_and_copy_view(
+                        info,
+                        path,
                         tensors=tensors,
-                        overwrite=True,
                         unlink=unlink,
-                        create_vds_index_tensor=True,
                         num_workers=num_workers,
                         scheduler=scheduler,
                         progressbar=progressbar,
                     )
-                    optimized.info.update(vds.info.__getstate__())
-                    optimized.info["virtual-datasource"] = False
-                    optimized.info["path"] = new_path
-                    optimized.flush()
+                    new.info["virtual-datasource"] = False
+                    new.info["path"] = new_path
+                    new.flush()
                     info["virtual-datasource"] = False
                     info["path"] = new_path
                     self._write_queries_json(qjson)
-                vds.base_storage.disable_readonly()
+                old.base_storage.disable_readonly()
                 try:
-                    vds.base_storage.clear()
+                    old.base_storage.clear()
                 except Exception as e:
                     warnings.warn(
                         f"Error while deleting old view after writing optimized version: {e}"

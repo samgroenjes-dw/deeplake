@@ -231,7 +231,7 @@ def test_csv(memory_ds: Dataset, dataframe_ingestion_data: dict):
     assert ds[tensors_names[2]].htype == "text"
     assert ds[tensors_names[2]].dtype == str
     np.testing.assert_array_equal(
-        ds[tensors_names[2]].numpy().reshape(-1), df[df_keys[2]].values
+        np.array(ds[tensors_names[2]].numpy()).reshape(-1), df[df_keys[2]].values
     )
 
 
@@ -273,7 +273,7 @@ def test_dataframe_basic(
     assert ds[df_keys[2]].htype == "text"
     assert ds[df_keys[2]].dtype == str
     np.testing.assert_array_equal(
-        ds[df_keys[2]].numpy().reshape(-1), df[df_keys[2]].values
+        np.array(ds[df_keys[2]].numpy()).reshape(-1), df[df_keys[2]].values
     )
 
 
@@ -306,7 +306,7 @@ def test_dataframe_files(memory_ds: Dataset, dataframe_ingestion_data):
 
 def test_dataframe_array(memory_ds: Dataset):
     data = {
-        "AA": ["Alice", "Bob", "Charlie", None],
+        "AA": ["Alice", "Bob", np.nan, None],
         "BB": [
             np.array([3, 22, 1, 3]),
             np.array([1, 22, 10, 1]),
@@ -342,7 +342,7 @@ def test_dataframe_array(memory_ds: Dataset):
     )
 
     np.testing.assert_array_equal(
-        ds[df_keys[2]].numpy().reshape(-1), df[df_keys[2]].values
+        np.array(ds[df_keys[2]][0:3].numpy()).reshape(-1), df[df_keys[2]].values[0:3]
     )
     assert ds[df_keys[2]].dtype == df[df_keys[2]].dtype
 

@@ -200,11 +200,9 @@ class LoginException(Exception):
 class UserNotLoggedInException(Exception):
     def __init__(self):
         message = (
-            "You are not logged in and an API token was not found. To complete the operation, you can\n"
-            "1. Login with your username and password using the `activeloop login` CLI command.\n"
-            "2. Create an API token at https://app.activeloop.ai and use it in any of the following ways:\n"
+            "No API token found. To complete the operation, you must "
+            "create an API token at https://app.activeloop.ai and use it in any of the following ways:\n"
             "    - Set the environment variable `ACTIVELOOP_TOKEN` to the token value.\n"
-            "    - Use the CLI command `activeloop login -t <token>`.\n"
             "    - Pass the API token to the `token` parameter of this function.\n"
             "Visit https://docs.activeloop.ai/getting-started/using-activeloop-storage for more information."
         )
@@ -261,7 +259,7 @@ class CouldNotCreateNewDatasetException(AuthorizationException):
     ):
         extra = ""
         if path.startswith("hub://"):
-            extra = "Since the path is a `hub://` dataset, if you believe you should have write permissions, try running `activeloop login`."
+            extra = "Since the path is a `hub://` dataset, if you believe you should have write permissions, ensure you are using the 'token' parameter or the ACTIVELOOP_TOKEN environment variable."
 
         message = f"Dataset at '{path}' doesn't exist, and you have no permissions to create one there. Maybe a typo? {extra}"
         super().__init__(message)
@@ -807,19 +805,10 @@ class AgreementNotAcceptedError(AgreementError):
 class NotLoggedInAgreementError(AgreementError):
     def __init__(self):
         super().__init__(
-            "You are not logged in. Please log in to accept the agreement."
+            "This dataset requires acceptance of a user agreement. "
+            "You must set an API token in order to agree to the license terms. "
+            "Visit https://docs.activeloop.ai/getting-started/using-activeloop-storage for more information."
         )
-
-
-class NotLoggedInError(AgreementError):
-    def __init__(self, msg=None):
-        msg = msg or (
-            "This dataset includes an agreement that needs to be accepted before you can use it.\n"
-            "You need to be signed in to accept this agreement.\n"
-            "You can login using 'activeloop login' on the command line if you have an account or using 'activeloop register' if you don't have one."
-        )
-
-        super().__init__(msg)
 
 
 class RenameError(Exception):
@@ -1004,8 +993,14 @@ class GetChunkError(Exception):
         chunk_key: Optional[str],
         global_index: Optional[int] = None,
         tensor_name: Optional[str] = None,
+        cause: Optional[Exception] = None,
     ):
+        self.root_cause = cause
         self.chunk_key = chunk_key
+
+        if isinstance(cause, GetChunkError):
+            self.root_cause = cause.root_cause
+
         message = "Unable to get chunk"
         if chunk_key is not None:
             message += f" '{chunk_key}'"
@@ -1014,6 +1009,14 @@ class GetChunkError(Exception):
         if tensor_name is not None:
             message += f" in tensor {tensor_name}"
         message += "."
+
+        if cause is not None:
+            cause_message = str(cause)
+            if isinstance(cause, KeyError):
+                cause_message = f"The file {cause} does not exist."
+
+            message += f" Root Cause: {cause_message}"
+
         super().__init__(message)
 
 
@@ -1138,3 +1141,11 @@ class IncorrectQueriesTypeError(Exception):
             "Please make sure, that queries is of type List[str]"
         )
         super().__init__(msg)
+
+
+class InvalidAuthContextError(Exception):
+    def __init__(
+        self,
+        message: str = "Authentication failed due to invalid or insufficient configuration.",
+    ):
+        super().__init__(message)

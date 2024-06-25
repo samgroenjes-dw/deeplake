@@ -1,3 +1,4 @@
+import sys
 from typing import Union, List, Tuple, Iterable, Optional
 from collections.abc import Iterable
 import numpy as np
@@ -198,6 +199,13 @@ class IndexEntry:
 
     def subscriptable(self):
         """Returns whether an IndexEntry can be further subscripted."""
+
+        if "indra" in sys.modules:
+            from indra import api  # type: ignore
+
+            if isinstance(self.value, api.core.IndexMappingInt64):
+                return self.value.subscriptable()
+
         return not isinstance(self.value, int)
 
     def indices(self, length: int):

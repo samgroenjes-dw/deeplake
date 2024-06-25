@@ -1,4 +1,5 @@
 import logging
+import os
 import pathlib
 from abc import abstractmethod, ABC
 from typing import Optional, Any, List, Dict, Union, Callable
@@ -6,9 +7,9 @@ import jwt
 
 import numpy as np
 
+from deeplake.client.config import DEEPLAKE_AUTH_TOKEN
 from deeplake.util.path import convert_pathlib_to_string_if_needed
 from deeplake.core.dataset import Dataset
-from deeplake.client.utils import read_token
 from deeplake.core.vectorstore import utils
 from deeplake.util.bugout_reporter import (
     feature_report_path,
@@ -39,13 +40,6 @@ class DHBase(ABC):
         logger: logging.Logger,
         **kwargs: Any,
     ):
-        try:
-            from indra import api  # type: ignore
-
-            self.indra_installed = True
-        except Exception:  # pragma: no cover
-            self.indra_installed = False  # pragma: no cover
-
         self._exec_option = exec_option
 
         self.path: Optional[str] = None
@@ -99,13 +93,11 @@ class DHBase(ABC):
 
     @property
     def token(self):
-        return self._token or read_token(from_env=True)
+        return self._token or os.environ.get(DEEPLAKE_AUTH_TOKEN)
 
     @property
     def exec_option(self) -> str:
-        return utils.parse_exec_option(
-            self.dataset, self._exec_option, self.indra_installed, self.username
-        )
+        return utils.parse_exec_option(self.dataset, self._exec_option, self.username)
 
     @property
     def username(self) -> str:
