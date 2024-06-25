@@ -495,7 +495,7 @@ def extend(
                 batch_end,
                 rate_limiter,
             )
-
+            logger.info(f"Length of batched embeddings {len(batched_embeddings)}")
             batched_tensors = _slice_non_embedding_tensors(
                 processed_tensors, embedding_tensor, batch_start, batch_end
             )
