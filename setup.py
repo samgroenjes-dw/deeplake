@@ -6,28 +6,24 @@ from setuptools import find_packages, setup
 
 project_name = "deeplake"
 
-
 this_directory = os.path.abspath(os.path.dirname(__file__))
 
-with open(os.path.join(this_directory, "deeplake/requirements/common.txt")) as f:
-    requirements = f.readlines()
+def read_requirements(file):
+    with open(os.path.join(this_directory, file)) as f:
+        return [line.strip() for line in f if line.strip()]
 
-with open(os.path.join(this_directory, "deeplake/requirements/tests.txt")) as f:
-    tests = f.readlines()
+requirements = read_requirements("deeplake/requirements/common.txt")
+tests = read_requirements("deeplake/requirements/tests.txt")
 
 with open(os.path.join(this_directory, "README.md"), encoding="utf-8") as f:
     long_description = f.read()
 
+req_map = {}
+for req in requirements:
+    match = re.match(r"^(([^!=<>~]+)(?:[!=<>~].*)?)$", req)
+    if match:
+        req_map[match.group(2)] = match.group(1)
 
-req_map = {
-    b: a
-    for a, b in (
-        re.findall(r"^(([^!=<>~]+)(?:[!=<>~].*)?$)", x.strip("\n"))[0]
-        for x in requirements
-    )
-}
-
-# Add optional dependencies to this dict without version. Version should be specified in requirements.txt
 extras = {
     "audio": ["av"],
     "video": ["av"],
@@ -46,7 +42,6 @@ extras = {
     "point_cloud": ["laspy"],
 }
 
-
 def libdeeplake_available():
     py_ver = sys.version_info
     if sys.platform == "linux":
@@ -62,30 +57,26 @@ def libdeeplake_available():
             return True
     return False
 
-
 all_extras = {r for v in extras.values() for r in v}
 install_requires = [req_map[r] for r in req_map if r not in all_extras]
-extras_require = {k: [req_map[r] for r in v] for k, v in extras.items()}
+extras_require = {k: [req_map.get(r, r) for r in v] for k, v in extras.items()}
 
-extras_require["all"] = [req_map[r] for r in all_extras]
+extras_require["all"] = [req_map.get(r, r) for r in all_extras]
 
 if libdeeplake_available():
-    libdeeplake = "libdeeplake==0.0.129"
+    libdeeplake = "libdeeplake==0.0.119"
     extras_require["enterprise"] = [libdeeplake, "pyjwt"]
     extras_require["all"].append(libdeeplake)
     install_requires.append(libdeeplake)
 
 init_file = os.path.join(project_name, "__init__.py")
 
-
 def get_property(prop):
     result = re.search(
-        # find variable with name `prop` in the __init__.py file
         rf'{prop}\s*=\s*[\'"]([^\'"]*)[\'"]',
         open(init_file).read(),
     )
     return result.group(1)
-
 
 config = {
     "name": project_name,
